@@ -17,7 +17,7 @@ Dependencies:
 import asyncio
 import os
 import logging
-from blink_handler import BlinkHandler
+from blink_handler import BlinkLocalHandler
 from telegram_handler import TelegramHandler
 import tempfile
 
@@ -29,41 +29,35 @@ class BlinkMonitor:
     Main monitoring system that coordinates between Blink cameras and Telegram notifications.
     
     Attributes:
-        blink_handler (BlinkHandler): Handles Blink camera operations
+        blink_handler (BlinkLocalHandler): Handles Blink camera operations
         telegram_handler (TelegramHandler): Handles Telegram notifications
         temp_dir (str): Directory for temporary video storage
     """
-    def __init__(self):
-        self.blink_handler = BlinkHandler()
+    def __init__(self, local_storage_path):
+        self.blink_handler = BlinkLocalHandler(local_storage_path)
         self.telegram_handler = TelegramHandler()
         self.temp_dir = tempfile.gettempdir()
         
         # Set up cross-references
         self.telegram_handler.set_blink_handler(self.blink_handler)
         
-    async def process_motion_events(self, events):
-        """Process motion events and send notifications"""
+        # Add motion callback
+        self.blink_handler.add_event_callback(self.handle_motion_event)
+        
+    async def handle_motion_event(self, event):
+        """Handle motion event from local storage"""
         if not await self.telegram_handler.is_running():
             return
             
-        for event in events:
-            camera = event['camera']
-            name = event['name']
+        try:
+            camera_name = event['camera_name']
+            video_path = event['video_path']
             
-            # Create temporary file for video
-            temp_video = os.path.join(self.temp_dir, f"motion_{name}.mp4")
+            # Send alert with video
+            await self.telegram_handler.send_motion_alert(camera_name, video_path)
             
-            try:
-                # Download the video
-                await camera.video_to_file(temp_video)
-                
-                # Send alert with video
-                await self.telegram_handler.send_motion_alert(name, temp_video)
-                
-                # Clean up
-                os.remove(temp_video)
-            except Exception as e:
-                logger.error(f"Error processing motion event: {str(e)}")
+        except Exception as e:
+            logger.error(f"Error handling motion event: {str(e)}")
     
     async def monitor_loop(self):
         """Main monitoring loop"""
@@ -78,25 +72,25 @@ class BlinkMonitor:
         # Start bot polling in the background
         asyncio.create_task(self.telegram_handler.start_polling())
         
+        # Keep the application running
         while True:
             try:
                 if not await self.telegram_handler.is_running():
                     logger.info("Bot disconnected. Stopping monitor loop.")
                     break
                     
-                # Check for motion events
-                events = await self.blink_handler.check_motion()
-                if events:
-                    await self.process_motion_events(events)
-                
-                # Wait before next check (30 seconds to respect API limits)
-                await asyncio.sleep(30)
+                await asyncio.sleep(1)
             except Exception as e:
-                logger.error(f"Error in monitoring loop: {str(e)}")
-                await asyncio.sleep(60)  # Wait longer on error
+                logger.error(f"Error in monitor loop: {str(e)}")
+                await asyncio.sleep(60)
 
 async def main():
-    monitor = BlinkMonitor()
+    local_storage_path = os.getenv('BLINK_LOCAL_STORAGE')
+    if not local_storage_path:
+        logger.error("BLINK_LOCAL_STORAGE environment variable not set")
+        return
+        
+    monitor = BlinkMonitor(local_storage_path)
     await monitor.monitor_loop()
 
 if __name__ == "__main__":
